@@ -1,0 +1,12 @@
+pipeline {
+    agent any
+    stages {
+        stage('SonarQube') { steps { sh 'echo TODO sonar' } }
+        stage('Build') { steps { sh 'docker build -t devsecops-api .' } }
+        stage('Trivy FS') { steps { sh 'trivy fs .' } }
+        stage('OWASP') { steps { sh 'echo TODO owasp' } }
+        stage('Push ECR') { steps { sh 'echo TODO ECR' } }
+        stage('Trivy Image') { steps { sh 'trivy image devsecops-api' } }
+        stage('ArgoCD Deploy') { steps { sh 'echo TODO gitops' } }
+    }
+}
