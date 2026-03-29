@@ -51,6 +51,10 @@ def get_logger(name: str) -> logging.Logger:
         handler.setFormatter(JSONFormatter())
         logger.addHandler(handler)
         logger.propagate = False
+	file_handler = logging.FileHandler("logs/app.log")
+	file_handler.setFormatter(JSONFormatter())
+	logger.addHandler(file_handler)
+	logger.propagate = False
     return logger
 
 
