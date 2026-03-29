@@ -1,0 +1,6 @@
+# Phase 1 — Flask login app
+# Pin versions for reproducible builds (critical in CI/CD)
+
+flask==3.0.3
+gunicorn==22.0.0         # Production WSGI server (never use Flask dev server in prod)
+python-dotenv==1.0.1     # Load secrets from .env (Phase 5: inject via Jenkins credentials)

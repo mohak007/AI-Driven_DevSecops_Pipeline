@@ -1,0 +1,164 @@
+// =============================================================================
+// AI-DevSecOps Pipeline — Jenkinsfile
+//
+// KEY FIXES vs your original:
+//   - "Setup Environment" stage REMOVED (Docker is pre-installed by Terraform)
+//   - Docker socket available directly since Jenkins runs on host
+//   - Trivy scan uses pre-installed binary (no install step)
+//   - Clean post block handles docker logout even if stages fail
+// =============================================================================
+
+pipeline {
+    agent any
+
+    environment {
+        // --- Update these 3 values for your setup ---
+        DOCKERHUB_USER  = "your-dockerhub-username"
+        IMAGE_NAME      = "ai-devsecops-app"
+        EC2_HOST        = "your-ec2-public-ip"   // output from terraform apply
+
+        // --- These are derived automatically ---
+        IMAGE_TAG       = "${IMAGE_NAME}:${BUILD_NUMBER}"
+        IMAGE_LATEST    = "${DOCKERHUB_USER}/${IMAGE_NAME}:latest"
+        IMAGE_VERSIONED = "${DOCKERHUB_USER}/${IMAGE_NAME}:${BUILD_NUMBER}"
+    }
+
+    stages {
+
+        // ------------------------------------------------------------------
+        // Stage 1: Cleanup workspace
+        // Always start with a clean slate to avoid stale artifacts
+        // ------------------------------------------------------------------
+        stage('Cleanup') {
+            steps {
+                cleanWs()
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Stage 2: Checkout
+        // Pull latest code from GitHub
+        // ------------------------------------------------------------------
+        stage('Checkout Code') {
+            steps {
+                checkout scm
+                sh 'ls -la'
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Stage 3: Build Docker Image
+        // context is app/ directory where Dockerfile lives
+        // ------------------------------------------------------------------
+        stage('Build Docker Image') {
+            steps {
+                sh """
+                    docker build \
+                        -t ${IMAGE_TAG} \
+                        -f app/Dockerfile \
+                        app/
+                """
+                sh "docker images | grep ${IMAGE_NAME}"
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Stage 4: Trivy Security Scan
+        // Scans the built image for CVEs before it ever touches DockerHub
+        // exit-code 1 = CRITICAL vulns found → fail the build
+        // ------------------------------------------------------------------
+        stage('Trivy Scan') {
+            steps {
+                sh """
+                    trivy image \
+                        --exit-code 0 \
+                        --severity HIGH,CRITICAL \
+                        --no-progress \
+                        --format table \
+                        ${IMAGE_TAG}
+                """
+                // Use exit-code 1 in production to BLOCK builds with critical CVEs:
+                // trivy image --exit-code 1 --severity CRITICAL ${IMAGE_TAG}
+            }
+            post {
+                always {
+                    sh "trivy image --format json --output trivy-report.json ${IMAGE_TAG} || true"
+                    archiveArtifacts artifacts: 'trivy-report.json', allowEmptyArchive: true
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Stage 5: Tag Image
+        // ------------------------------------------------------------------
+        stage('Tag Image') {
+            steps {
+                sh "docker tag ${IMAGE_TAG} ${IMAGE_VERSIONED}"
+                sh "docker tag ${IMAGE_TAG} ${IMAGE_LATEST}"
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Stage 6: Push to DockerHub
+        // Uses Jenkins credential 'dockerhub-cred' (configure in Jenkins UI)
+        // ------------------------------------------------------------------
+        stage('Push to DockerHub') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-cred',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh "echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin"
+                    sh "docker push ${IMAGE_VERSIONED}"
+                    sh "docker push ${IMAGE_LATEST}"
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Stage 7: Deploy to EC2
+        // SSH into the EC2 instance and run the new container
+        // Uses Jenkins credential 'ec2-ssh-key' (your .pem file)
+        // ------------------------------------------------------------------
+        stage('Deploy to EC2') {
+            steps {
+                withCredentials([sshUserPrivateKey(
+                    credentialsId: 'ec2-ssh-key',
+                    keyFileVariable: 'SSH_KEY'
+                )]) {
+                    sh """
+                        ssh -i ${SSH_KEY} \
+                            -o StrictHostKeyChecking=no \
+                            ubuntu@${EC2_HOST} '
+                                docker pull ${IMAGE_LATEST} &&
+                                docker stop flask-app 2>/dev/null || true &&
+                                docker rm flask-app 2>/dev/null || true &&
+                                docker run -d \
+                                    --name flask-app \
+                                    --restart unless-stopped \
+                                    -p 5000:5000 \
+                                    ${IMAGE_LATEST}
+                            '
+                    """
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // Post: Always clean up docker login session
+    // ------------------------------------------------------------------------
+    post {
+        always {
+            sh 'docker logout || true'
+            sh 'docker rmi ${IMAGE_TAG} ${IMAGE_VERSIONED} ${IMAGE_LATEST} 2>/dev/null || true'
+        }
+        success {
+            echo "Pipeline PASSED — image deployed: ${IMAGE_LATEST}"
+        }
+        failure {
+            echo "Pipeline FAILED — check logs above for the failing stage"
+        }
+    }
+}
